@@ -5,7 +5,14 @@ but **what they were believed to be on any given date**. Built to make one
 specific, invisible backtest bias measurable — and then to measure it.
 
 The answer: using restated fundamentals instead of point-in-time ones inflated
-a plain profitability strategy's Sharpe from **0.33 to 0.91**.
+a plain profitability strategy's Sharpe from **0.17 to 0.27**.
+
+> **Correction (2026-08-30).** This README previously reported 0.33 → 0.91.
+> That measurement was wrong, in the strategy's favour, for two reasons found
+> by auditing it — a period-length confound and an unbounded forward reach.
+> Both are described in [What the bias is worth](#what-the-bias-is-worth). The
+> corrected effect is real but roughly **six times smaller** than the headline
+> this repo used to lead with.
 
 ## The bias
 
@@ -43,24 +50,67 @@ rebalance quarterly — changing only which vintage of fundamentals it sees.
 
 | | point-in-time | restated | look-ahead |
 |---|---|---|---|
-| Total return | 33.5% | 122.4% | +88.9pp |
-| Annualized return | 3.0% | 8.5% | +5.5pp |
-| **Sharpe** | **0.33** | **0.91** | **+0.58** |
-| Hit rate | 69.2% | 66.7% | −2.6pp |
+| Total return | 15.3% | 32.7% | +17.3pp |
+| Annualized return | 1.5% | 2.9% | +1.5pp |
+| **Sharpe** | **0.17** | **0.27** | **+0.09** |
+| Hit rate | 64.1% | 66.7% | +2.6pp |
 
 Same code, same universe, same dates, same strategy. The only difference is
-whether the fundamentals were knowable at the time. **Restated data made a
-weak strategy look like a decent one** — a 2.8x Sharpe inflation, which is the
-size of the effect sitting silently inside most fundamental backtests.
+which vintage of an **already-ended** period each arm sees. Restated data does
+flatter the strategy, consistently and in the direction theory predicts — but
+by about a tenth of a Sharpe point, not by the 0.58 this repo used to claim.
 
-The restatement profile explains where it comes from: **6.6% of
+The restatement profile is where it comes from: **6.6% of
 company-concept-periods were revised after first publication**, and the median
-lag before the correction appeared was **464 days**. For well over a year,
-each of those figures was something other than what the restated feed reports.
+lag before the correction appeared was **464 days**. For well over a year, each
+of those figures was something other than what the restated feed reports. That
+this only buys a tenth of a Sharpe point is itself the finding: the revisions
+are frequent but small (median 0.7%), and a quarterly-rebalanced quintile book
+is not very sensitive to them.
 
-## Two data-quality findings worth reading
+### The two defects that produced 0.91
 
-Both were found by running the thing, not by reasoning about it.
+Both were in the measurement, not the warehouse, and both inflated the gap.
+
+**1. The arms ranked on different period lengths.** XBRL tags
+`NetIncomeLoss` over quarters, halves, nine-month spans and years, all in the
+same filing. `roe_signal` took the fact with the latest `period_end` — which
+picks a *different period length per company*, depending on the filer's tagging
+habits. Measured on this warehouse:
+
+| view | quarter | half | nine-month | annual |
+|---|---|---|---|---|
+| restated | 31 | 41 | 9 | 13 |
+| point-in-time @2022-06-30 | 75 | 4 | 8 | 5 |
+
+Names carrying an annual numerator showed a median ROE of **0.109** against
+**0.039** for names carrying a quarterly one — a 2.8x gap that is pure period
+length. Because tagging habits are stable per filer, the book was persistently
+long "companies whose latest tagged figure is annual" and short "companies whose
+latest tagged figure is quarterly". And because the two arms land on *different*
+mixes, the gap between them was part look-ahead and part artifact.
+
+**2. The restated arm read the future, not just the wrong vintage.** `latest()`
+returns every period the warehouse ever learned about, including periods that
+had not ended on the rebalance date. Taking "the latest period" out of that
+handed a 2022 rebalance **Apple's FY2025 net income**. That is a multi-year
+look-ahead — a far cruder thing than the restatement effect being measured, and
+large enough to swamp it.
+
+The fix is [`src/fundamentals.py`](src/fundamentals.py): one trailing-twelve-
+month window per name, assembled identically for everyone (four consecutive
+quarters, or a tagged annual figure — whichever ends later), capped at the
+rebalance date, with a staleness floor. Names that cannot produce a clean
+twelve-month window are dropped rather than approximated. The arms now differ
+*only* in which vintage of an already-ended period they see, which is the one
+difference the measurement is supposed to isolate.
+
+`measure_lookahead` prints the naive period-length mix on every run, so a
+regression is visible rather than silent.
+
+## Three data-quality findings worth reading
+
+All were found by running the thing, not by reasoning about it.
 
 **XBRL reporting-scale changes masquerade as restatements.** Atmos Energy's
 FY2010 net income appears as 73,997 in one filing and 73,997,000 in a later
@@ -74,6 +124,23 @@ same-sign changes whose ratio is within tolerance of a power of ten;
 `restatement_summary` excludes them and reports the count separately. A
 sign-flip — a loss becoming a profit, the most material restatement there is —
 is explicitly never filtered.
+
+**...and the power-of-ten test was too narrow to catch them all.** The
+paragraph above was written, the filter shipped, and
+`max_abs_pct_change` still read **331,176,570%** — the exact statistic the
+filter existed to protect. Amcor's Q1 2019 net income arrives as **−34 USD** in
+the 10-Q and **112,600,000 USD** in the 10-K. The ratio is 3.3 million and the
+sign flips, so it is neither a clean power of ten nor same-sign, and it walked
+straight through. Only 4 of 973 value changes exceed 100x, and *all four* are
+this kind of thing — a company does not revise its net income by two orders of
+magnitude. `pit._classify_revision` now sorts every change into
+`power_of_ten_rescale`, `implausible_ratio` (≥100x, either sign), or
+`economic`, and the headline uses only the last. `max_abs_pct_change` is now
+**1,621%**, and the excluded counts are reported rather than swallowed.
+
+The general lesson, which cost this repo its headline number twice: a filter
+that removes a known artifact is not evidence the artifact is gone. Check the
+statistic it was protecting.
 
 **Balance-sheet facts were silently invisible.** Instantaneous concepts
 (`Assets`, `StockholdersEquity`, `Cash`) describe a point rather than a span,
@@ -130,7 +197,7 @@ pip install -r requirements.txt
 
 python pipeline.py --n-tickers 120 --period 10y
 python -m scripts.measure_lookahead
-pytest tests/ -q                  # 34 tests
+pytest tests/ -q                  # 49 tests
 ```
 
 ```python
@@ -163,6 +230,7 @@ facts_as_of(con, "2009-11-15")    # only what was filed by then
 ```
 src/edgar.py        SEC XBRL client, bitemporal fact parsing, on-disk cache
 src/pit.py          as_of / latest / first_reported / restatements / lookahead_exposure
+src/fundamentals.py consistent-period assembly: ttm_flow / instant_stock / return_on_equity
 src/warehouse.py    DuckDB schema, idempotent loaders, SQL point-in-time queries
 src/membership.py   point-in-time index membership from Wikipedia revisions
 src/quality.py      blocking and advisory data quality gates
@@ -187,4 +255,4 @@ scripts/measure_lookahead.py    the measurement above
   Earlier fundamentals are not available through this route at all.
 - The strategy in `measure_lookahead` is deliberately plain. It is a
   measuring instrument for the data vintage, not a proposed strategy, and its
-  point-in-time Sharpe of 0.33 should not be read as an edge.
+  point-in-time Sharpe of 0.17 should not be read as an edge.

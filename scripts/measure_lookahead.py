@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src import fundamentals
 from src.pit import latest, restatement_summary
 from src.warehouse import connect, facts_as_of
 
@@ -37,35 +38,21 @@ REPORTS = Path(__file__).resolve().parent.parent / "reports"
 TRADING_DAYS = 252
 
 
-def _wide(facts: pd.DataFrame, concept: str) -> pd.DataFrame:
-    """Most recent value of `concept` per ticker, from an already-filtered
-    fact view."""
-    subset = facts[facts["concept"] == concept]
-    if subset.empty:
-        return pd.DataFrame(columns=["ticker", "value"])
-    return (
-        subset.sort_values("period_end")
-        .groupby("ticker", as_index=False)
-        .last()[["ticker", "value"]]
-    )
+def roe_signal(facts: pd.DataFrame, as_of: pd.Timestamp | None = None) -> pd.Series:
+    """Return on equity per ticker from a fact view.
 
-
-def roe_signal(facts: pd.DataFrame) -> pd.Series:
-    """Return on equity per ticker from a fact view."""
-    income = _wide(facts, "NetIncomeLoss").rename(columns={"value": "net_income"})
-    equity = _wide(facts, "StockholdersEquity").rename(columns={"value": "equity"})
-    merged = income.merge(equity, on="ticker", how="inner")
-    merged = merged[merged["equity"] > 0]
-    if merged.empty:
+    The numerator is a trailing-twelve-month figure assembled the same way for
+    every name (see :mod:`src.fundamentals`). An earlier version took whichever
+    ``NetIncomeLoss`` fact had the latest ``period_end``, which silently mixed
+    quarterly, half-year, nine-month and annual figures inside one
+    cross-section -- and, because the two arms below see different fact sets,
+    mixed them *differently between the arms*. The measured gap was then part
+    look-ahead and part period-length artifact.
+    """
+    roe = fundamentals.return_on_equity(facts, as_of=as_of)
+    if roe.empty:
         return pd.Series(dtype=float)
-
-    roe = (merged["net_income"] / merged["equity"]).set_axis(merged["ticker"])
-    # Clip to a plausible band. Beyond ordinary winsorising, this defends
-    # against XBRL reporting-scale changes (see pit._is_scale_change): if net
-    # income and equity are picked up from filings using different scales, the
-    # ratio is off by a factor of 1000 and would otherwise dominate the
-    # quintile ranking as a pure artifact.
-    return roe.clip(-1.0, 1.0)
+    return roe.set_index("ticker")["roe"]
 
 
 def quintile_returns(signal: pd.Series, forward_returns: pd.Series, min_names: int = 20) -> float:
@@ -88,7 +75,7 @@ def run_arm(con, prices: pd.DataFrame, rebalance_dates, all_facts: pd.DataFrame,
     out = {}
     for i, date in enumerate(rebalance_dates[:-1]):
         facts = facts_as_of(con, str(date.date())) if point_in_time else restated_view
-        signal = roe_signal(facts)
+        signal = roe_signal(facts, as_of=date)
         if signal.empty:
             continue
 
@@ -141,6 +128,22 @@ def main() -> None:
     for key, value in summary.items():
         print(f"    {key:<32} {value}")
 
+    # Kept in the output permanently. This mix is what a naive "latest
+    # period_end" pick would hand the ranking, and it is the defect that made
+    # the previous version of this measurement uninterpretable: the arms landed
+    # on different period lengths, so the gap between them was part look-ahead
+    # and part artifact. Printing it means a regression is visible rather than
+    # silent.
+    print("\nPeriod-length mix a naive 'latest period_end' pick would produce")
+    mixes = {}
+    for label, view in (("restated", latest(all_facts)),
+                        ("point-in-time @2022-06-30", facts_as_of(con, "2022-06-30"))):
+        mix = fundamentals.period_mix(view, "NetIncomeLoss")
+        mixes[label] = {str(k): int(v) for k, v in mix.items()}
+        print(f"    {label:<28} {mixes[label]}")
+    print("    (this measurement uses fundamentals.ttm_flow instead: "
+          "one twelve-month window for every name)")
+
     start = pd.Timestamp(args.start) if args.start else max(
         prices["date"].min(), all_facts["filed_date"].min()
     )
@@ -164,6 +167,13 @@ def main() -> None:
     out = REPORTS / "lookahead_measurement.json"
     out.write_text(json.dumps({
         "restatement_summary": summary,
+        "naive_period_length_mix": mixes,
+        "signal": {
+            "numerator": "trailing twelve months, fundamentals.ttm_flow",
+            "denominator": "latest common equity at or before the rebalance date",
+            "max_staleness_days": 400,
+            "winsorize_roe": 1.0,
+        },
         "point_in_time": pit_metrics,
         "restated": naive_metrics,
         "pit_returns": {str(k.date()): v for k, v in pit.items()},
