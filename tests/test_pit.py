@@ -258,4 +258,54 @@ def test_sign_flip_is_not_a_scale_change():
         {**base, "filed_date": pd.Timestamp("2021-08-01"), "value": 1000.0,
          "form": "10-K/A", "accession": "0002"},
     ])
-    assert bool(restatements(facts).iloc[0]["is_scale_artifact"]) is False
+    changed = restatements(facts)
+    assert bool(changed.iloc[0]["is_scale_artifact"]) is False
+    # A 10x sign-flipping revision is material and must stay in the headline.
+    assert changed.iloc[0]["revision_class"] == "economic"
+    assert restatement_summary(facts)["n_restated"] == 1
+
+
+def test_implausible_ratio_is_excluded_from_the_headline():
+    """Regression: the 331,176,570% "restatement" that survived the filter.
+
+    Amcor's Q1 2019 net income arrives as -34 USD in the 10-Q and as
+    112,600,000 USD in the 10-K. It is not a power-of-ten rescale -- the ratio
+    is 3.3 million and the sign flips -- so the exact-rescale test passed it
+    through, and it landed in max_abs_pct_change: the very statistic the
+    artifact filter existed to protect.
+    """
+    base = dict(cik=1, ticker="AMCR", concept="NetIncomeLoss", unit="USD",
+                period_start=pd.Timestamp("2019-01-01"), period_end=pd.Timestamp("2019-03-31"),
+                fiscal_year=2019, fiscal_period="Q1")
+    facts = pd.DataFrame([
+        {**base, "filed_date": pd.Timestamp("2019-05-09"), "value": -34.0,
+         "form": "10-Q", "accession": "0001"},
+        {**base, "filed_date": pd.Timestamp("2019-09-03"), "value": 112_600_000.0,
+         "form": "10-K", "accession": "0002"},
+    ])
+
+    changed = restatements(facts)
+    assert changed.iloc[0]["revision_class"] == "implausible_ratio"
+    assert bool(changed.iloc[0]["is_scale_artifact"]) is False
+
+    summary = restatement_summary(facts)
+    assert summary["n_restated"] == 0
+    assert summary["n_implausible_ratio_excluded"] == 1
+    assert summary["max_abs_pct_change"] == 0.0
+
+
+def test_a_large_but_plausible_revision_stays_in_the_headline():
+    """The ratio gate must not swallow real revisions. A 50x move off a small
+    base is unusual but reportable; only 100x and beyond is treated as bad
+    data."""
+    base = dict(cik=1, ticker="X", concept="NetIncomeLoss", unit="USD",
+                period_start=pd.Timestamp("2020-01-01"), period_end=pd.Timestamp("2020-12-31"),
+                fiscal_year=2020, fiscal_period="FY")
+    facts = pd.DataFrame([
+        {**base, "filed_date": pd.Timestamp("2021-02-01"), "value": 1_000_000.0,
+         "form": "10-K", "accession": "0001"},
+        {**base, "filed_date": pd.Timestamp("2021-08-01"), "value": 50_000_000.0,
+         "form": "10-K/A", "accession": "0002"},
+    ])
+    assert restatements(facts).iloc[0]["revision_class"] == "economic"
+    assert restatement_summary(facts)["n_restated"] == 1
