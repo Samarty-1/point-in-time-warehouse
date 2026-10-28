@@ -108,14 +108,16 @@ def _insert_ignoring_duplicates(
             staged[column] = staged[column].dt.normalize()
     staged = staged.drop_duplicates()
 
-    before = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    # fetchall(), not fetchone(): DuckDB 2.0 leaves a fetchone() result open and
+    # refuses the next call on the same connection.
+    before = con.execute(f"SELECT COUNT(*) FROM {table}").fetchall()[0][0]
     con.register("staged", staged)
     con.execute(
         f"INSERT INTO {table} ({', '.join(columns)}) "
         f"SELECT {', '.join(columns)} FROM staged ON CONFLICT DO NOTHING"
     )
     con.unregister("staged")
-    after = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    after = con.execute(f"SELECT COUNT(*) FROM {table}").fetchall()[0][0]
 
     inserted = after - before
     con.execute(
@@ -236,6 +238,6 @@ def restatement_report(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
 
 def table_counts(con: duckdb.DuckDBPyConnection) -> dict:
     return {
-        table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchall()[0][0]
         for table in ("fundamental_facts", "index_membership", "prices", "load_log")
     }
